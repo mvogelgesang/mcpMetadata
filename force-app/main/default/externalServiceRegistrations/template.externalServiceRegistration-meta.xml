@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExternalServiceRegistration xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>MCP_NAME</label>
+    <namedCredential>NAMESPACE__MCP_NAME</namedCredential>
+    <namedCredentialReference>MCP_NAME</namedCredentialReference>
+    <registrationProviderType>ModelContextProtocol</registrationProviderType>
+    <schema></schema>
+    <schemaType>ModelContextProtocol</schemaType>
+    <serviceBinding></serviceBinding>
+    <status>Complete</status>
+    <systemVersion>8</systemVersion>
+</ExternalServiceRegistration>
