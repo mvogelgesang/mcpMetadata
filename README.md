@@ -1,6 +1,8 @@
-# MCP Metadata for Salesforce
+# MCP Metadata for Salesforce (Closed Beta)
 
 This repository contains Salesforce metadata templates for integrating a Model Context Protocol (MCP) server with Salesforce using Named Credentials and External Services.
+
+The following metadata will only work for MCP Client Beta participants.
 
 ## What's Included
 
@@ -51,12 +53,17 @@ sf project deploy start --source-dir force-app
 
 ### 4. Assign Permission Set to User
 
-`sf org assign permset -n {permission set name}`
+```bash
+sf org assign permset -n {permission set name}`
+```
 
 ### 5. Activate MCP Server Connection
 
-1. Go to **Setup → Agentforce Registry → {MCP Server Name} → Edit
-2. Enter Client Id and Secret → Save and Continue
+1. [Workaround] Go to **Setup → Named Credentials → {MCP Server Name} → Click through to the External Credential
+2. Scroll down to Principals → Edit → Enter Client Id and Secret → Save
+3. Go to **Setup → Agentforce Registry → {MCP Server Name} → Edit
+4. Leave content in modal as is → Save and Continue
+5. Under Tools tab, Click Edit Tools. Full tool list will refresh
 
 ## File Structure
 
