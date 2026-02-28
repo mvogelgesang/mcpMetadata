@@ -1,0 +1,5 @@
+# Template metadata files - used by setup.mjs to generate instances. Do not deploy.
+**/template.externalCredential-meta.xml
+**/template.externalServiceRegistration-meta.xml
+**/template.namedCredential-meta.xml
+**/template_Perm_Set.permissionset-meta.xml

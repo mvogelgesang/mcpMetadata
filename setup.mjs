@@ -8,7 +8,7 @@
  */
 
 import { createInterface } from 'readline';
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -128,14 +128,40 @@ const promptWithValidation = async (variable) => {
 // File Operations
 // =============================================================================
 
-const replaceInFile = (filePath, replacements) => {
-  let content = readFileSync(filePath, 'utf8');
-  
+const applyReplacements = (content, replacements) => {
+  let result = content;
   for (const [search, replace] of Object.entries(replacements)) {
-    content = content.replaceAll(search, replace);
+    result = result.replaceAll(search, replace);
   }
-  
-  writeFileSync(filePath, content, 'utf8');
+  return result;
+};
+
+/** Copy template to new path with replacements applied. Leaves template unchanged. */
+const copyFromTemplate = (templatePath, newPath, replacements) => {
+  const content = readFileSync(templatePath, 'utf8');
+  const newContent = applyReplacements(content, replacements);
+  writeFileSync(newPath, newContent, 'utf8');
+};
+
+/** Returns true if any of the four metadata files for this MCP_NAME exist. */
+const instanceExists = (mcpName) => {
+  return FILES.some((file) => {
+    const path = join(FORCE_APP_DIR, file.dir, file.newName(mcpName));
+    return existsSync(path);
+  });
+};
+
+/** Derive existing MCP instance names from externalCredentials dir (canonical source). */
+const getExistingInstances = () => {
+  const dir = join(FORCE_APP_DIR, 'externalCredentials');
+  if (!existsSync(dir)) return [];
+  const names = new Set();
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const match = entry.name.match(/^(.+)\.externalCredential-meta\.xml$/);
+    if (match && match[1] !== TEMPLATE_NAME) names.add(match[1]);
+  }
+  return [...names].sort();
 };
 
 // =============================================================================
@@ -159,6 +185,11 @@ const main = async () => {
   // Gather values
   log.header('Step 1: Configuration Values');
   
+  const existing = getExistingInstances();
+  if (existing.length > 0) {
+    log.info(`Existing MCP instances: ${existing.join(', ')}`);
+  }
+
   const values = {};
   for (const variable of VARIABLES) {
     values[variable.key] = await promptWithValidation(variable);
@@ -197,23 +228,31 @@ const main = async () => {
     process.exit(0);
   }
   
-  // Apply changes
+  // Check for existing instance and confirm overwrite if needed
+  if (instanceExists(values.MCP_NAME)) {
+    const overwrite = await prompt(`${c.yellow}Metadata for '${values.MCP_NAME}' already exists. Overwrite? (y/n): ${c.reset}`);
+    if (overwrite.toLowerCase() !== 'y') {
+      console.log('');
+      log.warning('Setup cancelled. No changes were made.');
+      rl.close();
+      process.exit(0);
+    }
+  }
+
+  // Apply changes (copy from template; templates are left unchanged for future runs)
   log.header('Step 3: Applying Changes');
   
   for (const file of FILES) {
-    const oldPath = join(FORCE_APP_DIR, file.dir, file.oldName);
+    const templatePath = join(FORCE_APP_DIR, file.dir, file.oldName);
     const newPath = join(FORCE_APP_DIR, file.dir, file.newName(values.MCP_NAME));
     
-    if (!existsSync(oldPath)) {
-      log.error(`File not found: ${file.oldName}`);
+    if (!existsSync(templatePath)) {
+      log.error(`Template not found: ${file.oldName}`);
       continue;
     }
     
-    replaceInFile(oldPath, replacements);
-    log.success(`Updated: ${file.oldName}`);
-    
-    renameSync(oldPath, newPath);
-    log.success(`Renamed to: ${file.newName(values.MCP_NAME)}`);
+    copyFromTemplate(templatePath, newPath, replacements);
+    log.success(`Created: ${file.newName(values.MCP_NAME)}`);
   }
   
   // Complete
