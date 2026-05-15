@@ -98,17 +98,97 @@ const FILES = [
 /** True when this script lives under node_modules (npm / npx install). */
 const isInstalledFromNpm = () => __dirname.replace(/\\/g, '/').includes('/node_modules/');
 
+/** Map of value-bearing flag → key used in the values map. */
+const VALUE_FLAGS = {
+  '--mcp-name': 'MCP_NAME',
+  '--mcp-server-url': 'MCP_SERVER_URL',
+  '--auth-type': 'AUTH_TYPE',
+  '--auth-provider-url': 'AUTH_PROVIDER_URL',
+  '--namespace': 'NAMESPACE',
+};
+
+/** Normalize --auth-type input to the canonical AUTH_TYPES value, or null if unknown. */
+const normalizeAuthType = (raw) => {
+  const v = String(raw).trim().toLowerCase();
+  if (v === 'oauth' || v === 'oauth2' || v === AUTH_TYPES.OAUTH.toLowerCase()) return AUTH_TYPES.OAUTH;
+  if (v === 'noauth' || v === 'no-auth' || v === 'none' || v === AUTH_TYPES.NO_AUTH.toLowerCase()) return AUTH_TYPES.NO_AUTH;
+  return null;
+};
+
 const parseCliArgs = (argv) => {
-  const out = { target: null, help: false };
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--help' || argv[i] === '-h') {
-      out.help = true;
+  const out = { target: null, help: false, overwrite: false, values: {} };
+
+  const setValueFlag = (flag, raw) => {
+    const key = VALUE_FLAGS[flag];
+    if (key === 'AUTH_TYPE') {
+      const normalized = normalizeAuthType(raw);
+      if (!normalized) {
+        log.error(`${flag}: must be one of "oauth" or "noauth" (got "${raw}")`);
+        process.exit(1);
+      }
+      out.values[key] = normalized;
+      return;
     }
-    if (argv[i] === '--target' && argv[i + 1]) {
+    out.values[key] = raw;
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+
+    if (arg === '--help' || arg === '-h') {
+      out.help = true;
+      continue;
+    }
+
+    if (arg === '--overwrite' || arg === '--force') {
+      out.overwrite = true;
+      continue;
+    }
+
+    // Support --key=value
+    const eqIdx = arg.indexOf('=');
+    if (arg.startsWith('--') && eqIdx > 2) {
+      const flag = arg.slice(0, eqIdx);
+      const raw = arg.slice(eqIdx + 1);
+      if (flag === '--target') {
+        out.target = resolve(process.cwd(), raw);
+        continue;
+      }
+      if (flag in VALUE_FLAGS) {
+        setValueFlag(flag, raw);
+        continue;
+      }
+      log.error(`Unknown flag: ${flag}`);
+      process.exit(1);
+    }
+
+    // Support --key value
+    if (arg === '--target') {
+      if (!argv[i + 1]) {
+        log.error('--target requires a path argument');
+        process.exit(1);
+      }
       out.target = resolve(process.cwd(), argv[i + 1]);
       i += 1;
+      continue;
+    }
+
+    if (arg in VALUE_FLAGS) {
+      if (argv[i + 1] === undefined) {
+        log.error(`${arg} requires a value`);
+        process.exit(1);
+      }
+      setValueFlag(arg, argv[i + 1]);
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith('-')) {
+      log.error(`Unknown flag: ${arg}`);
+      process.exit(1);
     }
   }
+
   return out;
 };
 
@@ -284,123 +364,6 @@ const getMinimalServiceBinding = (mcpName) => ({
 });
 
 // =============================================================================
-// OAuth and MCP client
-// =============================================================================
-
-/** Get OAuth 2.0 access token via client_credentials grant. Returns token string or null. */
-const getOAuthToken = async (authProviderUrl, clientId, clientSecret) => {
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: clientId,
-    client_secret: clientSecret,
-  });
-  const res = await fetch(authProviderUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`OAuth token request failed (${res.status}): ${text}`);
-  }
-  const data = await res.json();
-  return data.access_token ?? null;
-};
-
-/** Send one JSON-RPC request to the MCP server. Returns result; throws on error. */
-const mcpJsonRpc = async (url, method, params = {}, token = null) => {
-  const id = Math.floor(Math.random() * 1e9);
-  const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
-  const headers = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json, text/event-stream',
-  };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-
-  const res = await fetch(url, { method: 'POST', headers, body });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`MCP request failed (${res.status}): ${text.slice(0, 200)}`);
-  }
-  const data = await res.json();
-  if (data.error) {
-    throw new Error(data.error.message || JSON.stringify(data.error));
-  }
-  return data.result;
-};
-
-/** Normalize a tool from tools/list to schema shape (name, title, description, inputSchema, annotations). */
-const normalizeTool = (t) => ({
-  name: t.name ?? '',
-  title: t.title ?? null,
-  description: t.description ?? null,
-  inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
-  annotations: t.annotations ?? null,
-});
-
-/** Fetch schema and serviceBinding from MCP server. Returns { schema, serviceBinding } or null on failure. */
-const fetchSchemaFromMcp = async (mcpServerUrl, authProviderUrl, clientId, clientSecret) => {
-  let token = null;
-  if (clientId && clientSecret) {
-    try {
-      token = await getOAuthToken(authProviderUrl, clientId, clientSecret);
-      log.success('OAuth token obtained.');
-    } catch (err) {
-      log.warning(`OAuth failed: ${err.message}`);
-      return null;
-    }
-  }
-
-  try {
-    const initParams = {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: 'mcp-metadata-setup', version: '1.0.0' },
-    };
-    const initResult = await mcpJsonRpc(mcpServerUrl, 'initialize', initParams, token);
-    const protocolVersion = initResult.protocolVersion ?? MCP_PROTOCOL_VERSION;
-    const serverInfo = initResult.serverInfo ?? { name: 'mcp-server', version: '1.0.0' };
-    const instructions = initResult.instructions ?? null;
-
-    const serverDescriptor = { protocolVersion, serverInfo };
-    const serviceBinding = { protocolVersion, serverInfo, instructions };
-
-    let tools = [];
-    let cursor = undefined;
-    do {
-      const params = cursor ? { cursor } : {};
-      const listResult = await mcpJsonRpc(mcpServerUrl, 'tools/list', params, token);
-      const list = listResult?.tools ?? [];
-      tools = tools.concat(list.map(normalizeTool));
-      cursor = listResult?.nextCursor ?? null;
-    } while (cursor);
-
-    let resources = [];
-    try {
-      let resCursor = undefined;
-      do {
-        const params = resCursor ? { cursor: resCursor } : {};
-        const listResult = await mcpJsonRpc(mcpServerUrl, 'resources/list', params, token);
-        const list = listResult?.resources ?? [];
-        resources = resources.concat(list);
-        resCursor = listResult?.nextCursor ?? null;
-      } while (resCursor);
-    } catch {
-      resources = [];
-    }
-
-    const schema = { serverDescriptor, tools, resources };
-    return { schema, serviceBinding };
-  } catch (err) {
-    log.warning(`MCP fetch failed: ${err.message}`);
-    if (String(err.message).includes('401') && !token) {
-      log.info('If your MCP server requires OAuth, provide Client ID and Client Secret and try again.');
-    }
-    return null;
-  }
-};
-
-// =============================================================================
 // Main
 // =============================================================================
 
@@ -415,32 +378,86 @@ Usage:
   npm create @mvogelgesang/sf-mcp-client-metadata@latest -- [options]
 
 Options:
-  --target <path>   SFDX project root, or path to force-app/main/default
-  -h, --help        Show this message
+  --target <path>            SFDX project root, or path to force-app/main/default
+  --mcp-name <name>          Unique identifier for the MCP server (letters only)
+  --mcp-server-url <url>     MCP server endpoint URL (http(s)://...)
+  --auth-type <type>         Authentication type: oauth | noauth (default: oauth)
+  --auth-provider-url <url>  OAuth token endpoint URL (required when auth-type=oauth)
+  --namespace <ns>           Salesforce namespace prefix (optional; pass "" for none)
+  --overwrite, --force       Overwrite an existing MCP instance without prompting
+  -h, --help                 Show this message
 
-When installed via npm/npx, files are written under the current directory’s
-force-app/main/default/. When run from a clone, files default to this repo’s
+Flags accept --key value or --key=value.
+
+When all required flags are provided (--mcp-name, --mcp-server-url, --auth-type,
+and --auth-provider-url when auth-type=oauth) the wizard runs non-interactively
+and applies changes without confirmation prompts.
+
+When installed via npm/npx, files are written under the current directory's
+force-app/main/default/. When run from a clone, files default to this repo's
 force-app/main/default/ unless --target is set.
 `);
     process.exit(0);
   }
 
+  // Validate any CLI-provided values up front against the same predicates used
+  // for interactive prompts; fail fast on bad flag values.
+  const flagToOption = {
+    MCP_NAME: '--mcp-name',
+    MCP_SERVER_URL: '--mcp-server-url',
+    AUTH_TYPE: '--auth-type',
+    AUTH_PROVIDER_URL: '--auth-provider-url',
+    NAMESPACE: '--namespace',
+  };
+  for (const variable of VARIABLES) {
+    const raw = cli.values[variable.key];
+    if (raw === undefined) continue;
+    if (variable.choices) {
+      const allowed = variable.choices.map((ch) => ch.value);
+      if (!allowed.includes(raw)) {
+        log.error(`${flagToOption[variable.key]}: must be one of ${allowed.join(', ')} (got "${raw}")`);
+        process.exit(1);
+      }
+      continue;
+    }
+    if (typeof variable.validate === 'function' && !variable.validate(raw)) {
+      log.error(`${flagToOption[variable.key]}: ${variable.error}`);
+      process.exit(1);
+    }
+  }
+
+  // Warn (but don't fail) if --auth-provider-url was passed alongside noauth.
+  if (cli.values.AUTH_TYPE === AUTH_TYPES.NO_AUTH && cli.values.AUTH_PROVIDER_URL) {
+    log.warning('--auth-provider-url is ignored when --auth-type=noauth.');
+    delete cli.values.AUTH_PROVIDER_URL;
+  }
+
+  // Compute non-interactive mode: every required value must be set via flags.
+  const effectiveAuthType = cli.values.AUTH_TYPE ?? null;
+  const nonInteractive = Boolean(
+    cli.values.MCP_NAME &&
+    cli.values.MCP_SERVER_URL &&
+    effectiveAuthType &&
+    (effectiveAuthType === AUTH_TYPES.NO_AUTH || cli.values.AUTH_PROVIDER_URL)
+  );
+
   const outputRoot = resolveOutputRoot(cli);
 
-  console.clear();
+  if (!nonInteractive) console.clear();
   log.header('MCP Metadata Setup Wizard');
 
   log.info(`Metadata output: ${outputRoot}`);
 
-  console.log('This wizard will configure the Salesforce metadata files for your');
-  console.log('Model Context Protocol (MCP) server integration.\n');
-  console.log('You\'ll be prompted for the following values:');
-  VARIABLES.forEach((v, i) => {
-    const opt = v.optional ? ' (optional)' : '';
-    console.log(`  ${c.bold}${i + 1}.${c.reset} ${v.key}${opt}`);
-  });
-
-  await prompt(`\n${c.yellow}Press Enter to continue or Ctrl+C to cancel...${c.reset}`);
+  if (!nonInteractive) {
+    console.log('This wizard will configure the Salesforce metadata files for your');
+    console.log('Model Context Protocol (MCP) server integration.\n');
+    console.log('You\'ll be prompted for the following values:');
+    VARIABLES.forEach((v, i) => {
+      const opt = v.optional ? ' (optional)' : '';
+      console.log(`  ${c.bold}${i + 1}.${c.reset} ${v.key}${opt}`);
+    });
+    await prompt(`\n${c.yellow}Press Enter to continue or Ctrl+C to cancel...${c.reset}`);
+  }
 
   // Gather values
   log.header('Step 1: Configuration Values');
@@ -450,9 +467,19 @@ force-app/main/default/ unless --target is set.
     log.info(`Existing MCP instances: ${existing.join(', ')}`);
   }
 
-  const values = {};
+  // Pre-populate from CLI flags so the loop below skips already-known values.
+  const values = { ...cli.values };
   for (const variable of VARIABLES) {
     if (variable.condition && !variable.condition(values)) continue;
+    if (values[variable.key] !== undefined) {
+      log.info(`${variable.key}: ${values[variable.key] || '(none)'} (from --${variable.key.toLowerCase().replaceAll('_', '-')})`);
+      continue;
+    }
+    // In non-interactive mode, optional variables default to empty rather than blocking on a prompt.
+    if (nonInteractive && variable.optional) {
+      values[variable.key] = '';
+      continue;
+    }
     if (variable.choices) {
       values[variable.key] = await promptChoice(variable);
     } else {
@@ -462,45 +489,10 @@ force-app/main/default/ unless --target is set.
   const authType = values.AUTH_TYPE ?? AUTH_TYPES.OAUTH;
   const isNoAuth = authType === AUTH_TYPES.NO_AUTH;
 
-  // Optional: fetch schema and serviceBinding from MCP server
-  log.header('Step 1b: Schema from MCP (optional)');
-  console.log('The External Service Registration needs a schema (tools list) and service binding.\n');
-  const fetchSchema = (await prompt(`${c.green}▸${c.reset} Fetch schema from MCP server now? (y/n): `)).trim().toLowerCase() === 'y';
-
-  let schemaObj;
-  let serviceBindingObj;
-  let schemaSource = 'minimal stub';
-
-  if (fetchSchema) {
-    let clientId = '';
-    let clientSecret = '';
-    if (!isNoAuth) {
-      clientId = (await prompt(`${c.green}▸${c.reset} Client ID (optional, if MCP requires OAuth): `)).trim();
-      clientSecret = (await prompt(`${c.green}▸${c.reset} Client Secret (optional): `)).trim();
-    } else {
-      log.info('No Authentication selected — skipping OAuth credentials.');
-    }
-    log.info('Calling MCP server...');
-    const result = await fetchSchemaFromMcp(
-      values.MCP_SERVER_URL,
-      values.AUTH_PROVIDER_URL ?? null,
-      clientId || null,
-      clientSecret || null,
-    );
-    if (result) {
-      schemaObj = result.schema;
-      serviceBindingObj = result.serviceBinding;
-      schemaSource = `fetched (${schemaObj.tools?.length ?? 0} tools, ${schemaObj.resources?.length ?? 0} resources)`;
-      log.success('Schema and service binding fetched from MCP server.');
-    } else {
-      log.warning('Using minimal schema stub. You can deploy and refresh tools in Agentforce later.');
-      schemaObj = getMinimalSchema(values.MCP_NAME);
-      serviceBindingObj = getMinimalServiceBinding(values.MCP_NAME);
-    }
-  } else {
-    schemaObj = getMinimalSchema(values.MCP_NAME);
-    serviceBindingObj = getMinimalServiceBinding(values.MCP_NAME);
-  }
+  // Schema and service binding always use a minimal stub; tools refresh after
+  // deploy in Setup → Agentforce Registry.
+  const schemaObj = getMinimalSchema(values.MCP_NAME);
+  const serviceBindingObj = getMinimalServiceBinding(values.MCP_NAME);
 
   const schemaJsonEscaped = escapeXml(JSON.stringify(schemaObj));
   const serviceBindingJsonEscaped = escapeXml(JSON.stringify(serviceBindingObj));
@@ -531,7 +523,6 @@ force-app/main/default/ unless --target is set.
     console.log(`  ${c.bold}AUTH_PROVIDER_URL:${c.reset} ${values.AUTH_PROVIDER_URL}`);
   }
   console.log(`  ${c.bold}NAMESPACE:${c.reset}         ${values.NAMESPACE || '(none)'}`);
-  console.log(`  ${c.bold}Schema:${c.reset}            ${schemaSource}`);
 
   console.log(`\n${c.bold}Files to be written under:${c.reset} ${outputRoot}\n`);
   console.log(`${c.bold}Files to be updated:${c.reset}`);
@@ -540,24 +531,36 @@ force-app/main/default/ unless --target is set.
     console.log(`  • ${file.dir}/${templateFile}`);
     console.log(`    → ${file.dir}/${file.newName(values.MCP_NAME)}\n`);
   }
-  
-  const confirm = await prompt(`${c.yellow}Apply these changes? (y/n): ${c.reset}`);
-  
-  if (confirm.toLowerCase() !== 'y') {
-    console.log('');
-    log.warning('Setup cancelled. No changes were made.');
-    rl.close();
-    process.exit(0);
-  }
-  
-  // Check for existing instance and confirm overwrite if needed
-  if (instanceExists(values.MCP_NAME, outputRoot)) {
-    const overwrite = await prompt(`${c.yellow}Metadata for '${values.MCP_NAME}' already exists. Overwrite? (y/n): ${c.reset}`);
-    if (overwrite.toLowerCase() !== 'y') {
+
+  if (!nonInteractive) {
+    const confirm = await prompt(`${c.yellow}Apply these changes? (y/n): ${c.reset}`);
+    if (confirm.toLowerCase() !== 'y') {
       console.log('');
       log.warning('Setup cancelled. No changes were made.');
       rl.close();
       process.exit(0);
+    }
+  }
+
+  // Check for existing instance and confirm overwrite if needed
+  if (instanceExists(values.MCP_NAME, outputRoot)) {
+    if (nonInteractive) {
+      if (!cli.overwrite) {
+        console.log('');
+        log.error(`Metadata for '${values.MCP_NAME}' already exists. Pass --overwrite to replace it.`);
+        rl.close();
+        process.exit(1);
+      }
+    } else {
+      const overwrite = cli.overwrite
+        ? 'y'
+        : await prompt(`${c.yellow}Metadata for '${values.MCP_NAME}' already exists. Overwrite? (y/n): ${c.reset}`);
+      if (overwrite.toLowerCase() !== 'y') {
+        console.log('');
+        log.warning('Setup cancelled. No changes were made.');
+        rl.close();
+        process.exit(0);
+      }
     }
   }
 

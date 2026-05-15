@@ -20,7 +20,7 @@ The following metadata will only work for MCP Client Beta participants.
 - A Salesforce org with API access
 - Your MCP server details:
   - Server URL
-  - For OAuth servers only: OAuth token endpoint URL, Client ID, and Client Secret
+  - For OAuth servers only: OAuth token endpoint URL
 
 ## Quick Start (recommended — no clone)
 
@@ -40,10 +40,42 @@ Pass flags after `--` (required by npm so they are forwarded to the generator):
 npm create @mvogelgesang/sf-mcp-client-metadata@latest -- --target ./packages/my-app
 ```
 
+All flags accept either `--key value` or `--key=value`.
+
 - **`--target <path>`** — SFDX project root (must contain `force-app/main/default`), or a path that already is `force-app/main/default`, or a directory that contains `externalCredentials` / `namedCredentials` as direct children (treated as the `default` metadata folder).
+- **`--mcp-name <name>`** — Unique identifier for the MCP server. Letters only, no numbers or underscores.
+- **`--mcp-server-url <url>`** — MCP server endpoint URL (must start with `http://` or `https://`).
+- **`--auth-type <type>`** — Authentication type. Accepts `oauth` or `noauth` (case-insensitive). Defaults to `oauth` when prompted interactively.
+- **`--auth-provider-url <url>`** — OAuth 2.0 token endpoint URL. Required when `--auth-type=oauth`; ignored with a warning when `--auth-type=noauth`.
+- **`--namespace <ns>`** — Salesforce namespace prefix. Optional; pass `""` to explicitly skip.
+- **`--overwrite`** (alias `--force`) — Replace an existing MCP instance with the same name without prompting.
+- **`-h`, `--help`** — Show help and exit.
 
 ```bash
 node setup.mjs --help
+```
+
+### Non-interactive usage
+
+When `--mcp-name`, `--mcp-server-url`, `--auth-type`, and (for `oauth`) `--auth-provider-url` are all provided, the wizard runs without any prompts and applies changes directly. Use `--overwrite` to replace an existing instance.
+
+```bash
+npm create @mvogelgesang/sf-mcp-client-metadata@latest -- \
+  --mcp-name weatherApi \
+  --mcp-server-url https://mcp.example.com/api \
+  --auth-type oauth \
+  --auth-provider-url https://auth.example.com/oauth/token \
+  --namespace mycompany \
+  --overwrite
+```
+
+For an unauthenticated server, omit `--auth-provider-url`:
+
+```bash
+node setup.mjs \
+  --mcp-name weatherApi \
+  --mcp-server-url https://mcp.example.com/api \
+  --auth-type noauth
 ```
 
 ## Quick Start (clone this repo)
