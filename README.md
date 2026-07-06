@@ -1,4 +1,8 @@
-# MCP Metadata for Salesforce (Closed Beta)
+# Project Deprecated
+
+Recommend using the [Agent Plugin](https://github.com/salesforcecli/plugin-agent/tree/main#plugin-agent) for Salesforce CLI to create and manage MCP Server Registrations going forward. This project will no longer be maintained.
+
+## MCP Metadata for Salesforce (Closed Beta)
 
 This repository contains Salesforce metadata templates for integrating a Model Context Protocol (MCP) server with Salesforce using Named Credentials and External Services.
 
